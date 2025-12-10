@@ -1,4 +1,5 @@
 import os
+import time
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -99,11 +100,55 @@ def get_agent(api_key: str):
 
 
 def generate_response(input_text: str):
-    """Generate response using the controller agent."""
+    """Generate response using the controller agent with streaming status."""
     agent = get_agent(openai_api_key)
-    with st.spinner(f"Querying {agent.name}..."):
-        response = agent.run(input_text)
-    st.markdown(response)
+
+    # Create a status container for showing tool execution
+    status_container = st.status("Processing...", expanded=True)
+
+    tool_start_time = None
+    current_tool = None
+    response = None
+
+    def update_status(tool_name: str, elapsed: float):
+        """Update the status display with tool name and elapsed time."""
+        status_container.update(label=f"Thinking... {tool_name}")
+
+    with status_container:
+        for item in agent.stream(input_text):
+            if item.startswith("__FINAL__"):
+                # Extract final response
+                response = item[9:]  # Remove "__FINAL__" prefix
+            else:
+                # This is a tool name
+                tool_name = item
+
+                # If we were timing a previous tool, log it
+                if current_tool and tool_start_time:
+                    elapsed = time.time() - tool_start_time
+                    st.write(f"Thought {elapsed:.0f}s {current_tool}")
+
+                # Start timing the new tool
+                current_tool = tool_name
+                tool_start_time = time.time()
+                update_status(tool_name, 0)
+
+                # Update status periodically while tool is running
+                # (The actual update happens on next iteration)
+
+        # Log the last tool if there was one
+        if current_tool and tool_start_time:
+            elapsed = time.time() - tool_start_time
+            st.write(f"Thought {elapsed:.0f}s {current_tool}")
+
+    status_container.update(label="Complete", state="complete", expanded=False)
+
+    # Display the final response
+    if response:
+        st.markdown(response)
+    else:
+        st.warning("No response received from the agent.")
+
     # Flush Langfuse events to ensure traces are sent
     langfuse.flush()
 

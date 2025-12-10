@@ -1,10 +1,10 @@
 """Controller agent that routes queries to specialized agents using handoffs."""
 
-from typing import Any, Optional
+from typing import Any, Callable, Generator, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
@@ -92,16 +92,9 @@ class ControllerAgent(BaseAgent):
     def description(self) -> str:
         return "Routes queries to specialized Langfuse agents (Docs or Support)"
 
-    def run(self, query: str) -> str:
-        """Execute a query by routing to the appropriate specialized agent.
-
-        Args:
-            query: The user's question about Langfuse.
-
-        Returns:
-            The agent's response.
-        """
-        system_prompt = """You are a helpful Langfuse assistant that routes user queries to specialized agents.
+    def _get_system_prompt(self) -> str:
+        """Get the system prompt for the controller agent."""
+        return """You are a helpful Langfuse assistant that routes user queries to specialized agents.
 
 You have access to two specialized agents:
 
@@ -128,7 +121,19 @@ You have access to two specialized agents:
 Synthesize the information from the agents into a clear, helpful response.
 If both agents are consulted, combine their insights coherently."""
 
-        messages = [SystemMessage(content=system_prompt), HumanMessage(content=query)]
+    def run(self, query: str) -> str:
+        """Execute a query by routing to the appropriate specialized agent.
+
+        Args:
+            query: The user's question about Langfuse.
+
+        Returns:
+            The agent's response.
+        """
+        messages = [
+            SystemMessage(content=self._get_system_prompt()),
+            HumanMessage(content=query),
+        ]
 
         config = {"callbacks": self._callbacks} if self._callbacks else {}
         result = self.agent.invoke({"messages": messages}, config=config)
@@ -136,3 +141,41 @@ If both agents are consulted, combine their insights coherently."""
         if result.get("messages"):
             return result["messages"][-1].content
         return "Unable to process the query."
+
+    def stream(
+        self, query: str, on_tool_start: Optional[Callable[[str], None]] = None
+    ) -> Generator[str, None, None]:
+        """Stream the agent execution, yielding tool names as they are called.
+
+        Args:
+            query: The user's question about Langfuse.
+            on_tool_start: Optional callback called when a tool starts executing.
+
+        Yields:
+            Tool names as they are invoked, and finally the response.
+        """
+        messages = [
+            SystemMessage(content=self._get_system_prompt()),
+            HumanMessage(content=query),
+        ]
+
+        config = {"callbacks": self._callbacks} if self._callbacks else {}
+
+        final_response = None
+
+        for chunk in self.agent.stream({"messages": messages}, config=config):
+            # Check for agent actions (tool calls)
+            if "agent" in chunk:
+                agent_messages = chunk["agent"].get("messages", [])
+                for msg in agent_messages:
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        for tool_call in msg.tool_calls:
+                            tool_name = tool_call.get("name", "unknown")
+                            if on_tool_start:
+                                on_tool_start(tool_name)
+                            yield tool_name
+                    elif isinstance(msg, AIMessage) and msg.content:
+                        final_response = msg.content
+
+        if final_response:
+            yield f"__FINAL__{final_response}"
