@@ -23,13 +23,19 @@ langfuse = get_client()
 
 st.title("Learn Langfuse, Maybe")
 
-# Get API key from environment or sidebar input
+# Initialize chat history in session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Get API keys from environment or sidebar input
 openai_api_key = os.getenv("OPENAI_API_KEY") or st.sidebar.text_input(
     "OpenAI API Key", type="password"
 )
+github_token = os.getenv("GITHUB_TOKEN") or st.sidebar.text_input(
+    "GitHub token", type="password"
+)
 
 # Knowledge base record counter
-st.sidebar.markdown("---")
 kb_counter = st.sidebar.empty()
 
 
@@ -54,7 +60,6 @@ if st.sidebar.button("Sync Knowledge Base"):
         with st.sidebar.status("Syncing...", expanded=True) as status:
             st.write("Fetching discussions from GitHub...")
             discussions = fetch_all_support_discussions(max_discussions=100)
-            st.write(f"Found {len(discussions)} discussions")
 
             st.write("Indexing documents...")
 
@@ -99,7 +104,7 @@ def get_agent(api_key: str):
     return ControllerAgent(llm=llm, langfuse_handler=langfuse_handler)
 
 
-def generate_response(input_text: str):
+def generate_response(input_text: str) -> str:
     """Generate response using the controller agent with streaming status."""
     agent = get_agent(openai_api_key)
 
@@ -110,8 +115,8 @@ def generate_response(input_text: str):
     current_tool = None
     response = None
 
-    def update_status(tool_name: str, elapsed: float):
-        """Update the status display with tool name and elapsed time."""
+    def update_status(tool_name: str):
+        """Update the status display with tool name."""
         status_container.update(label=f"Thinking... {tool_name}")
 
     with status_container:
@@ -131,10 +136,7 @@ def generate_response(input_text: str):
                 # Start timing the new tool
                 current_tool = tool_name
                 tool_start_time = time.time()
-                update_status(tool_name, 0)
-
-                # Update status periodically while tool is running
-                # (The actual update happens on next iteration)
+                update_status(tool_name)
 
         # Log the last tool if there was one
         if current_tool and tool_start_time:
@@ -143,25 +145,31 @@ def generate_response(input_text: str):
 
     status_container.update(label="Complete", state="complete", expanded=False)
 
-    # Display the final response
-    if response:
-        st.markdown(response)
-    else:
-        st.warning("No response received from the agent.")
-
     # Flush Langfuse events to ensure traces are sent
     langfuse.flush()
 
+    return response or "No response received from the agent."
 
-with st.form("my_form"):
-    text = st.text_area(
-        "Enter your question about Langfuse:",
-        "What is Langfuse and how do I get started?",
-    )
-    submitted = st.form_submit_button("Submit")
 
-    if submitted:
-        if not openai_api_key:
-            st.warning("Please enter your OpenAI API key!", icon="⚠")
-        else:
-            generate_response(text)
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat input
+if prompt := st.chat_input("Ask a question about Langfuse..."):
+    if not openai_api_key:
+        st.warning("Please enter your OpenAI API key in the sidebar.", icon="⚠")
+    else:
+        # Add user message to history and display it
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Generate and display assistant response
+        with st.chat_message("assistant"):
+            response = generate_response(prompt)
+            st.markdown(response)
+
+        # Add assistant response to history
+        st.session_state.messages.append({"role": "assistant", "content": response})
