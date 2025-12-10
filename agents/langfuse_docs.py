@@ -1,5 +1,6 @@
 """Langfuse documentation agent using MCP HTTP endpoint."""
 
+import json
 from typing import Any
 
 import httpx
@@ -11,6 +12,21 @@ from langgraph.prebuilt import create_react_agent
 from agents.base import BaseAgent
 
 MCP_ENDPOINT = "https://langfuse.com/api/mcp"
+
+
+def _parse_sse_response(text: str) -> dict:
+    """Parse Server-Sent Events response to extract JSON data.
+
+    Args:
+        text: Raw SSE response text.
+
+    Returns:
+        Parsed JSON data from the SSE message.
+    """
+    for line in text.strip().split("\n"):
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    return {}
 
 
 def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
@@ -34,11 +50,20 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         response = client.post(
             MCP_ENDPOINT,
             json=request_body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
         )
         response.raise_for_status()
 
-        result = response.json()
+        # Handle SSE (text/event-stream) or JSON response
+        content_type = response.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            result = _parse_sse_response(response.text)
+        else:
+            result = response.json()
+
         print("RESULT:", result)
         if "result" in result:
             content = result["result"].get("content", [])
