@@ -6,11 +6,15 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from langfuse import get_client
 from langgraph.prebuilt import create_react_agent
 
 from agents.base import BaseAgent
 from agents.langfuse_docs import LangfuseDocsAgent
 from agents.langfuse_support import LangfuseSupportAgent
+
+# Prompt name in Langfuse UI
+CONTROLLER_PROMPT_NAME = "Agent router system prompt"
 
 
 class ControllerAgent(BaseAgent):
@@ -93,33 +97,28 @@ class ControllerAgent(BaseAgent):
         return "Routes queries to specialized Langfuse agents (Docs or Support)"
 
     def _get_system_prompt(self) -> str:
-        """Get the system prompt for the controller agent."""
-        return """You are a helpful Langfuse assistant that routes user queries to specialized agents.
+        """Get the system prompt for the controller agent from Langfuse.
 
-You have access to two specialized agents:
+        Supports both text and chat prompts. For chat prompts, extracts the
+        system message content.
+        """
+        langfuse = get_client()
+        prompt = langfuse.get_prompt(CONTROLLER_PROMPT_NAME)
+        compiled = prompt.compile()
 
-1. **langfuse_docs_agent**: For questions about official Langfuse documentation
-   - How to use Langfuse features
-   - API references and SDK usage
-   - Getting started guides
-   - Integration instructions
-   - Official best practices
+        # Handle chat prompts (returns list of messages)
+        if isinstance(compiled, list):
+            # Find the system message in the chat prompt
+            for msg in compiled:
+                if isinstance(msg, dict) and msg.get("role") == "system":
+                    return msg.get("content", "")
+            # Fallback: use first message content if no system role found
+            if compiled and isinstance(compiled[0], dict):
+                return compiled[0].get("content", "")
+            return ""
 
-2. **langfuse_support_agent**: For troubleshooting and community questions
-   - Debugging issues and errors
-   - Common problems and their solutions
-   - Real-world usage patterns
-   - Issues other users have encountered
-   - Workarounds and fixes
-
-**Routing Guidelines:**
-- For "how do I..." or "what is..." questions about Langfuse features → use langfuse_docs_agent
-- For "I'm getting an error..." or "it's not working..." → use langfuse_support_agent
-- For questions that could benefit from both perspectives, call both agents
-- Always use at least one agent - never try to answer without consulting them
-
-Synthesize the information from the agents into a clear, helpful response.
-If both agents are consulted, combine their insights coherently."""
+        # Handle text prompts (returns string)
+        return compiled
 
     def _build_messages(
         self, query: str, history: Optional[list[dict[str, str]]] = None
