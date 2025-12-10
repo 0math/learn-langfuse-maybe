@@ -9,7 +9,7 @@ from agents import LangfuseDocsAgent
 
 load_dotenv()
 
-st.title("Learn Langfuse, Maybe")
+st.title("!Learn Langfuse, Maybe")
 
 # Get API key from environment or sidebar input
 openai_api_key = os.getenv("OPENAI_API_KEY") or st.sidebar.text_input(
