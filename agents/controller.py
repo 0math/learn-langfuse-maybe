@@ -4,7 +4,7 @@ from typing import Any, Callable, Generator, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
@@ -121,19 +121,44 @@ You have access to two specialized agents:
 Synthesize the information from the agents into a clear, helpful response.
 If both agents are consulted, combine their insights coherently."""
 
-    def run(self, query: str) -> str:
+    def _build_messages(
+        self, query: str, history: Optional[list[dict[str, str]]] = None
+    ) -> list[BaseMessage]:
+        """Build the message list including system prompt and conversation history.
+
+        Args:
+            query: The current user query.
+            history: Optional list of previous messages with 'role' and 'content' keys.
+
+        Returns:
+            List of BaseMessage objects for the agent.
+        """
+        messages: list[BaseMessage] = [SystemMessage(content=self._get_system_prompt())]
+
+        # Add conversation history
+        if history:
+            for msg in history:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    messages.append(AIMessage(content=msg["content"]))
+
+        # Add current query
+        messages.append(HumanMessage(content=query))
+
+        return messages
+
+    def run(self, query: str, history: Optional[list[dict[str, str]]] = None) -> str:
         """Execute a query by routing to the appropriate specialized agent.
 
         Args:
             query: The user's question about Langfuse.
+            history: Optional conversation history (list of {"role": "user"|"assistant", "content": "..."}).
 
         Returns:
             The agent's response.
         """
-        messages = [
-            SystemMessage(content=self._get_system_prompt()),
-            HumanMessage(content=query),
-        ]
+        messages = self._build_messages(query, history)
 
         config = {"callbacks": self._callbacks} if self._callbacks else {}
         result = self.agent.invoke({"messages": messages}, config=config)
@@ -143,21 +168,22 @@ If both agents are consulted, combine their insights coherently."""
         return "Unable to process the query."
 
     def stream(
-        self, query: str, on_tool_start: Optional[Callable[[str], None]] = None
+        self,
+        query: str,
+        history: Optional[list[dict[str, str]]] = None,
+        on_tool_start: Optional[Callable[[str], None]] = None,
     ) -> Generator[str, None, None]:
         """Stream the agent execution, yielding tool names as they are called.
 
         Args:
             query: The user's question about Langfuse.
+            history: Optional conversation history (list of {"role": "user"|"assistant", "content": "..."}).
             on_tool_start: Optional callback called when a tool starts executing.
 
         Yields:
             Tool names as they are invoked, and finally the response.
         """
-        messages = [
-            SystemMessage(content=self._get_system_prompt()),
-            HumanMessage(content=query),
-        ]
+        messages = self._build_messages(query, history)
 
         config = {"callbacks": self._callbacks} if self._callbacks else {}
 

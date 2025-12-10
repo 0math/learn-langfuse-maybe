@@ -104,8 +104,16 @@ def get_agent(api_key: str):
     return ControllerAgent(llm=llm, langfuse_handler=langfuse_handler)
 
 
-def generate_response(input_text: str) -> str:
-    """Generate response using the controller agent with streaming status."""
+def generate_response(input_text: str, history: list[dict[str, str]]) -> str:
+    """Generate response using the controller agent with streaming status.
+
+    Args:
+        input_text: The current user query.
+        history: Conversation history (list of {"role": "user"|"assistant", "content": "..."}).
+
+    Returns:
+        The agent's response.
+    """
     agent = get_agent(openai_api_key)
 
     # Create a status container for showing tool execution
@@ -120,7 +128,7 @@ def generate_response(input_text: str) -> str:
         status_container.update(label=f"Thinking... {tool_name}")
 
     with status_container:
-        for item in agent.stream(input_text):
+        for item in agent.stream(input_text, history=history):
             if item.startswith("__FINAL__"):
                 # Extract final response
                 response = item[9:]  # Remove "__FINAL__" prefix
@@ -161,15 +169,15 @@ if prompt := st.chat_input("Ask a question about Langfuse..."):
     if not openai_api_key:
         st.warning("Please enter your OpenAI API key in the sidebar.", icon="⚠")
     else:
-        # Add user message to history and display it
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Generate and display assistant response
+        # Generate response with conversation history (before adding current message)
         with st.chat_message("assistant"):
-            response = generate_response(prompt)
+            response = generate_response(prompt, history=st.session_state.messages)
             st.markdown(response)
 
-        # Add assistant response to history
+        # Add both messages to history after generation
+        st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.messages.append({"role": "assistant", "content": response})
