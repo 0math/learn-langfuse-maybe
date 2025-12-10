@@ -21,7 +21,7 @@ load_dotenv()
 # Initialize Langfuse client for tracing
 langfuse = get_client()
 
-st.title("Learn Langfuse Maybe")
+st.title("Learn Langfuse Maybe (LLM)")
 
 # Initialize chat history in session state
 if "messages" not in st.session_state:
@@ -87,6 +87,14 @@ if st.sidebar.button("Clear Knowledge Base"):
             st.sidebar.error("Failed to clear knowledge base")
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
+
+# Documentation links
+st.sidebar.markdown(
+    "[Why is this here?](https://github.com/0math/learn-langfuse-maybe/blob/main/architecture.md#part-2-chromadb-knowledge-base)"
+)
+st.sidebar.markdown(
+    "[About Knowledge Bases](https://docs.trychroma.com/guides/build/intro-to-retrieval)"
+)
 
 
 def get_agent(api_key: str):
