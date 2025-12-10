@@ -21,7 +21,7 @@ load_dotenv()
 # Initialize Langfuse client for tracing
 langfuse = get_client()
 
-st.title("Learn Langfuse, Maybe")
+st.title("Learn Langfuse Maybe")
 
 # Initialize chat history in session state
 if "messages" not in st.session_state:
@@ -181,3 +181,6 @@ if prompt := st.chat_input("Ask a question about Langfuse..."):
         # Add both messages to history after generation
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.messages.append({"role": "assistant", "content": response})
+
+        # Update knowledge base counter (may have changed during sync_knowledge_base tool)
+        update_kb_counter()
