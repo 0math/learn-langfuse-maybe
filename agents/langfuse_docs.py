@@ -64,7 +64,6 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         else:
             result = response.json()
 
-        print("RESULT:", result)
         if "result" in result:
             content = result["result"].get("content", [])
             if content and isinstance(content, list):
@@ -87,7 +86,6 @@ def search_langfuse_docs(query: str) -> str:
         query: The search query about Langfuse.
     """
     try:
-        print("---Calling MCP ---")
         return _call_mcp_tool("searchLangfuseDocs", {"query": query})
     except Exception as e:
         return f"Error searching docs: {str(e)}"

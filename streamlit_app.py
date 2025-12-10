@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from langchain_openai.chat_models import ChatOpenAI
 from pydantic import SecretStr
 
-from agents import LangfuseDocsAgent
+from agents import LangfuseDocsAgent, LangfuseSupportAgent
 
 load_dotenv()
 
@@ -19,6 +19,7 @@ openai_api_key = os.getenv("OPENAI_API_KEY") or st.sidebar.text_input(
 # Agent selection for future extensibility
 agent_options = {
     "Langfuse Docs": "langfuse_docs",
+    "Langfuse Support": "langfuse_support",
 }
 selected_agent = st.sidebar.selectbox("Select Agent", list(agent_options.keys()))
 
@@ -33,6 +34,8 @@ def get_agent(agent_type: str, api_key: str):
 
     if agent_type == "langfuse_docs":
         return LangfuseDocsAgent(llm=llm)
+    if agent_type == "langfuse_support":
+        return LangfuseSupportAgent(llm=llm)
 
     raise ValueError(f"Unknown agent type: {agent_type}")
 
