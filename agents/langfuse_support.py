@@ -1,7 +1,7 @@
 """Langfuse support agent for searching GitHub Discussions."""
 
 import os
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from langchain_core.language_models import BaseChatModel
@@ -10,11 +10,142 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 from agents.base import BaseAgent
+from agents.knowledge_base import (
+    get_knowledge_base_stats,
+    index_discussions,
+    search_knowledge_base,
+)
 
 GITHUB_API_URL = "https://api.github.com/graphql"
 LANGFUSE_REPO_OWNER = "langfuse"
 LANGFUSE_REPO_NAME = "langfuse"
 SUPPORT_CATEGORY_SLUG = "support"
+
+
+def _fetch_discussions_page(
+    category_slug: str = SUPPORT_CATEGORY_SLUG,
+    first: int = 50,
+    after: Optional[str] = None,
+) -> dict:
+    """Fetch a page of GitHub Discussions using the GraphQL API.
+
+    Args:
+        category_slug: Discussion category to filter by.
+        first: Number of results per page (max 100).
+        after: Cursor for pagination.
+
+    Returns:
+        Dictionary containing discussion data and pagination info.
+    """
+    graphql_query = """
+    query ListDiscussions($owner: String!, $repo: String!, $first: Int!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        discussions(first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            title
+            url
+            body
+            createdAt
+            author {
+              login
+            }
+            category {
+              name
+              slug
+            }
+            comments(first: 10) {
+              nodes {
+                body
+                author {
+                  login
+                }
+                isAnswer
+              }
+            }
+            answer {
+              body
+              author {
+                login
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "owner": LANGFUSE_REPO_OWNER,
+        "repo": LANGFUSE_REPO_NAME,
+        "first": first,
+    }
+    if after:
+        variables["after"] = after
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(
+            GITHUB_API_URL,
+            json={"query": graphql_query, "variables": variables},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def fetch_all_support_discussions(
+    category_slug: str = SUPPORT_CATEGORY_SLUG,
+    max_discussions: int = 200,
+) -> list[dict]:
+    """Fetch all discussions from a category, handling pagination.
+
+    Args:
+        category_slug: Discussion category to filter by.
+        max_discussions: Maximum number of discussions to fetch.
+
+    Returns:
+        List of discussion dictionaries.
+    """
+    all_discussions = []
+    after = None
+
+    while len(all_discussions) < max_discussions:
+        remaining = max_discussions - len(all_discussions)
+        page_size = min(50, remaining)
+
+        data = _fetch_discussions_page(
+            category_slug=category_slug,
+            first=page_size,
+            after=after,
+        )
+
+        if "errors" in data:
+            break
+
+        repo_data = data.get("data", {}).get("repository", {})
+        discussions_data = repo_data.get("discussions", {})
+        discussions = discussions_data.get("nodes", [])
+
+        # Filter by category slug
+        for discussion in discussions:
+            if discussion:
+                disc_category = discussion.get("category", {}).get("slug", "")
+                if disc_category == category_slug:
+                    all_discussions.append(discussion)
+
+        page_info = discussions_data.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+
+        after = page_info.get("endCursor")
+
+    return all_discussions
 
 
 def _search_github_discussions(
@@ -195,6 +326,106 @@ def search_langfuse_support_detailed(query: str) -> str:
         return f"Error searching support discussions: {str(e)}"
 
 
+@tool
+def search_knowledge_base_tool(query: str) -> str:
+    """Search the local knowledge base for Langfuse support answers.
+
+    This searches through previously indexed GitHub Discussions stored locally.
+    Use this for fast semantic search when you need to find relevant discussions
+    that have already been indexed.
+
+    Args:
+        query: The search query about Langfuse issues or questions.
+    """
+    try:
+        docs = search_knowledge_base(query, k=5)
+
+        if not docs:
+            return "No relevant discussions found in the knowledge base. Try using search_langfuse_support to search GitHub directly, or sync the knowledge base first."
+
+        output = [f"Found {len(docs)} relevant result(s) in knowledge base:\n"]
+
+        for i, doc in enumerate(docs, 1):
+            metadata = doc.metadata
+            title = metadata.get("title", "Untitled")
+            url = metadata.get("url", "")
+            doc_type = metadata.get("type", "unknown")
+            author = metadata.get("author", "Unknown")
+
+            output.append(f"## {i}. [{doc_type.upper()}] {title}")
+            output.append(f"**URL:** {url}")
+            output.append(f"**Author:** {author}")
+            output.append(f"**Content:**\n{doc.page_content[:500]}...")
+            output.append("\n---\n")
+
+        return "\n".join(output)
+    except Exception as e:
+        return f"Error searching knowledge base: {str(e)}"
+
+
+@tool
+def sync_knowledge_base(max_discussions: int = 100) -> str:
+    """Sync GitHub Discussions to the local knowledge base.
+
+    Fetches discussions from the Langfuse GitHub Support category and indexes
+    them in ChromaDB for fast semantic search. Only new discussions are added.
+
+    Args:
+        max_discussions: Maximum number of discussions to fetch (default 100).
+    """
+    try:
+        # Fetch discussions from GitHub
+        discussions = fetch_all_support_discussions(max_discussions=max_discussions)
+
+        if not discussions:
+            return "No discussions found to index."
+
+        # Index into ChromaDB
+        indexed_count = index_discussions(discussions)
+
+        # Get updated stats
+        stats = get_knowledge_base_stats()
+
+        return (
+            f"Sync complete!\n"
+            f"- Fetched {len(discussions)} discussions from GitHub\n"
+            f"- Indexed {indexed_count} new documents\n"
+            f"- Knowledge base now contains:\n"
+            f"  - {stats.get('total_documents', 0)} total documents\n"
+            f"  - {stats.get('unique_discussions', 0)} unique discussions\n"
+            f"  - {stats.get('questions', 0)} questions\n"
+            f"  - {stats.get('answers', 0)} answers"
+        )
+    except httpx.HTTPStatusError as e:
+        return f"HTTP Error fetching discussions: {e.response.status_code}"
+    except Exception as e:
+        return f"Error syncing knowledge base: {str(e)}"
+
+
+@tool
+def get_knowledge_base_status() -> str:
+    """Get the current status of the knowledge base.
+
+    Returns statistics about the indexed discussions including total documents,
+    number of questions, and number of answers.
+    """
+    try:
+        stats = get_knowledge_base_stats()
+
+        if "error" in stats:
+            return f"Error getting knowledge base status: {stats['error']}"
+
+        return (
+            f"Knowledge Base Status:\n"
+            f"- Total documents: {stats.get('total_documents', 0)}\n"
+            f"- Unique discussions: {stats.get('unique_discussions', 0)}\n"
+            f"- Questions: {stats.get('questions', 0)}\n"
+            f"- Answers: {stats.get('answers', 0)}"
+        )
+    except Exception as e:
+        return f"Error getting knowledge base status: {str(e)}"
+
+
 class LangfuseSupportAgent(BaseAgent):
     """Agent that searches Langfuse GitHub Discussions for support answers."""
 
@@ -213,6 +444,9 @@ class LangfuseSupportAgent(BaseAgent):
         self.tools = [
             search_langfuse_support,
             search_langfuse_support_detailed,
+            search_knowledge_base_tool,
+            sync_knowledge_base,
+            get_knowledge_base_status,
         ]
         self.agent = create_react_agent(self.llm, self.tools)
 
@@ -236,9 +470,21 @@ class LangfuseSupportAgent(BaseAgent):
         system_prompt = """You are a helpful assistant that finds answers to Langfuse questions
 by searching community discussions on GitHub.
 
-You have access to tools that search the Langfuse GitHub Discussions Support category:
+You have access to the following tools:
+
+**Knowledge Base (Local ChromaDB):**
+- search_knowledge_base_tool: Fast semantic search through indexed discussions
+- sync_knowledge_base: Fetch and index discussions from GitHub into local storage
+- get_knowledge_base_status: Check how many discussions are indexed
+
+**GitHub Search (Live API):**
 - search_langfuse_support: Quick search for relevant discussions (5 results)
 - search_langfuse_support_detailed: More comprehensive search (10 results)
+
+**Recommended workflow:**
+1. First, try search_knowledge_base_tool for fast local search
+2. If no results or knowledge base is empty, use sync_knowledge_base to populate it
+3. Fall back to search_langfuse_support for live GitHub search when needed
 
 Your goal is to:
 1. Search for discussions relevant to the user's question
