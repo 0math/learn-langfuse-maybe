@@ -1,8 +1,9 @@
 """Base agent class providing common functionality for all agents."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 
 
@@ -13,14 +14,21 @@ class BaseAgent(ABC):
     Subclasses must implement the `run` method.
     """
 
-    def __init__(self, llm: BaseChatModel, **kwargs: Any):
+    def __init__(
+        self,
+        llm: BaseChatModel,
+        langfuse_handler: Optional[BaseCallbackHandler] = None,
+        **kwargs: Any,
+    ):
         """Initialize the agent with a language model.
 
         Args:
             llm: The language model to use for the agent.
+            langfuse_handler: Optional Langfuse callback handler for tracing.
             **kwargs: Additional configuration options.
         """
         self.llm = llm
+        self.langfuse_handler = langfuse_handler
         self.config = kwargs
 
     @property

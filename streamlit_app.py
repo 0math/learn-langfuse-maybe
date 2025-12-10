@@ -3,6 +3,8 @@ import os
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai.chat_models import ChatOpenAI
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 from pydantic import SecretStr
 
 from agents import (
@@ -15,6 +17,9 @@ from agents import (
 from agents.langfuse_support import fetch_all_support_discussions
 
 load_dotenv()
+
+# Initialize Langfuse client for tracing
+langfuse = get_client()
 
 st.title("Learn Langfuse, Maybe")
 
@@ -88,16 +93,20 @@ if st.sidebar.button("Clear Knowledge Base"):
 
 def get_agent(agent_type: str, api_key: str):
     """Get the appropriate agent based on selection."""
+    # Create Langfuse callback handler for tracing LangChain/LangGraph calls
+    langfuse_handler = LangfuseCallbackHandler()
+
     llm = ChatOpenAI(
-        model="gpt-4o-mini",
+        model="gpt-5",
         temperature=0.7,
         api_key=SecretStr(api_key),
+        callbacks=[langfuse_handler],  # Trace all LLM calls
     )
 
     if agent_type == "langfuse_docs":
-        return LangfuseDocsAgent(llm=llm)
+        return LangfuseDocsAgent(llm=llm, langfuse_handler=langfuse_handler)
     if agent_type == "langfuse_support":
-        return LangfuseSupportAgent(llm=llm)
+        return LangfuseSupportAgent(llm=llm, langfuse_handler=langfuse_handler)
 
     raise ValueError(f"Unknown agent type: {agent_type}")
 
@@ -108,6 +117,8 @@ def generate_response(input_text: str, agent_type: str):
     with st.spinner(f"Querying {agent.name}..."):
         response = agent.run(input_text)
     st.markdown(response)
+    # Flush Langfuse events to ensure traces are sent
+    langfuse.flush()
 
 
 with st.form("my_form"):

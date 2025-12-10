@@ -449,6 +449,8 @@ class LangfuseSupportAgent(BaseAgent):
             get_knowledge_base_status,
         ]
         self.agent = create_react_agent(self.llm, self.tools)
+        # Store callbacks for agent invocation
+        self._callbacks = [self.langfuse_handler] if self.langfuse_handler else []
 
     @property
     def name(self) -> str:
@@ -536,7 +538,9 @@ Always cite the discussion URLs when referencing solutions."""
 
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=query)]
 
-        result = self.agent.invoke({"messages": messages})
+        # Invoke agent with Langfuse callback for tracing
+        config = {"callbacks": self._callbacks} if self._callbacks else {}
+        result = self.agent.invoke({"messages": messages}, config=config)
 
         if result.get("messages"):
             return result["messages"][-1].content
