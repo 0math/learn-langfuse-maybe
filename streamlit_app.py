@@ -8,8 +8,7 @@ from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 from pydantic import SecretStr
 
 from agents import (
-    LangfuseDocsAgent,
-    LangfuseSupportAgent,
+    ControllerAgent,
     clear_knowledge_base,
     get_knowledge_base_stats,
     index_discussions,
@@ -27,13 +26,6 @@ st.title("Learn Langfuse, Maybe")
 openai_api_key = os.getenv("OPENAI_API_KEY") or st.sidebar.text_input(
     "OpenAI API Key", type="password"
 )
-
-# Agent selection for future extensibility
-agent_options = {
-    "Langfuse Docs": "langfuse_docs",
-    "Langfuse Support": "langfuse_support",
-}
-selected_agent = st.sidebar.selectbox("Select Agent", list(agent_options.keys()))
 
 # Knowledge base record counter
 st.sidebar.markdown("---")
@@ -91,29 +83,24 @@ if st.sidebar.button("Clear Knowledge Base"):
         st.sidebar.error(f"Error: {e}")
 
 
-def get_agent(agent_type: str, api_key: str):
-    """Get the appropriate agent based on selection."""
+def get_agent(api_key: str):
+    """Get the controller agent that automatically routes to specialized agents."""
     # Create Langfuse callback handler for tracing LangChain/LangGraph calls
     langfuse_handler = LangfuseCallbackHandler()
 
     llm = ChatOpenAI(
-        model="gpt-5",
+        model="gpt-4o-mini",
         temperature=0.7,
         api_key=SecretStr(api_key),
         callbacks=[langfuse_handler],  # Trace all LLM calls
     )
 
-    if agent_type == "langfuse_docs":
-        return LangfuseDocsAgent(llm=llm, langfuse_handler=langfuse_handler)
-    if agent_type == "langfuse_support":
-        return LangfuseSupportAgent(llm=llm, langfuse_handler=langfuse_handler)
-
-    raise ValueError(f"Unknown agent type: {agent_type}")
+    return ControllerAgent(llm=llm, langfuse_handler=langfuse_handler)
 
 
-def generate_response(input_text: str, agent_type: str):
-    """Generate response using the selected agent."""
-    agent = get_agent(agent_type, openai_api_key)
+def generate_response(input_text: str):
+    """Generate response using the controller agent."""
+    agent = get_agent(openai_api_key)
     with st.spinner(f"Querying {agent.name}..."):
         response = agent.run(input_text)
     st.markdown(response)
@@ -132,4 +119,4 @@ with st.form("my_form"):
         if not openai_api_key:
             st.warning("Please enter your OpenAI API key!", icon="⚠")
         else:
-            generate_response(text, agent_options[selected_agent])
+            generate_response(text)
