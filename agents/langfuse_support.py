@@ -458,6 +458,29 @@ class LangfuseSupportAgent(BaseAgent):
     def description(self) -> str:
         return "Searches Langfuse GitHub Discussions for community support answers"
 
+    def _is_knowledge_base_empty(self) -> bool:
+        """Check if the knowledge base is empty."""
+        try:
+            stats = get_knowledge_base_stats()
+            return stats.get("total_documents", 0) == 0
+        except Exception:
+            return True
+
+    def _trigger_background_sync(self) -> None:
+        """Trigger background sync of knowledge base (non-blocking)."""
+        import threading
+
+        def sync():
+            try:
+                discussions = fetch_all_support_discussions(max_discussions=100)
+                if discussions:
+                    index_discussions(discussions)
+            except Exception:
+                pass  # Silent fail for background task
+
+        thread = threading.Thread(target=sync, daemon=True)
+        thread.start()
+
     def run(self, query: str) -> str:
         """Search Langfuse GitHub Discussions for answers.
 
@@ -467,24 +490,41 @@ class LangfuseSupportAgent(BaseAgent):
         Returns:
             The agent's response based on discussion search results.
         """
-        system_prompt = """You are a helpful assistant that finds answers to Langfuse questions
+        kb_empty = self._is_knowledge_base_empty()
+
+        if kb_empty:
+            # Trigger background sync for future queries
+            self._trigger_background_sync()
+
+            # Use GitHub search directly for immediate response
+            system_prompt = """You are a helpful assistant that finds answers to Langfuse questions
 by searching community discussions on GitHub.
 
-You have access to the following tools:
+The local knowledge base is empty, so use GitHub search directly.
 
-**Knowledge Base (Local ChromaDB):**
-- search_knowledge_base_tool: Fast semantic search through indexed discussions
-- sync_knowledge_base: Fetch and index discussions from GitHub into local storage
-- get_knowledge_base_status: Check how many discussions are indexed
-
-**GitHub Search (Live API):**
+**Available tools:**
 - search_langfuse_support: Quick search for relevant discussions (5 results)
 - search_langfuse_support_detailed: More comprehensive search (10 results)
 
+Your goal is to:
+1. Search GitHub for discussions relevant to the user's question
+2. Summarize the most helpful answers and solutions found
+3. Provide links to relevant discussions so users can read more
+4. If no relevant discussions are found, suggest the user create a new discussion
+
+Always cite the discussion URLs when referencing solutions."""
+        else:
+            system_prompt = """You are a helpful assistant that finds answers to Langfuse questions
+by searching community discussions.
+
 **Recommended workflow:**
-1. First, try search_knowledge_base_tool for fast local search
-2. If no results or knowledge base is empty, use sync_knowledge_base to populate it
-3. Fall back to search_langfuse_support for live GitHub search when needed
+1. First, use search_knowledge_base_tool for fast local search
+2. If no good results found, use search_langfuse_support for live GitHub search
+
+**Available tools:**
+- search_knowledge_base_tool: Fast semantic search through indexed discussions
+- search_langfuse_support: Quick GitHub search (5 results)
+- search_langfuse_support_detailed: More comprehensive GitHub search (10 results)
 
 Your goal is to:
 1. Search for discussions relevant to the user's question
@@ -492,8 +532,7 @@ Your goal is to:
 3. Provide links to relevant discussions so users can read more
 4. If no relevant discussions are found, suggest the user create a new discussion
 
-Always cite the discussion URLs when referencing solutions.
-If the search doesn't return useful results, try rephrasing the query."""
+Always cite the discussion URLs when referencing solutions."""
 
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=query)]
 

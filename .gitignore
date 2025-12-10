@@ -77,3 +77,4 @@ docs
 tests/mocks/llama-index-storage
 
 *.local.*
+chroma_db/

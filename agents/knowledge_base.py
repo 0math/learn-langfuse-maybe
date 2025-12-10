@@ -233,11 +233,9 @@ def search_knowledge_base(
     """
     vector_store = get_vector_store(collection_name, persist_dir)
 
-    search_kwargs = {"k": k}
     if filter_type:
-        search_kwargs["filter"] = {"type": filter_type}
-
-    return vector_store.similarity_search(query, **search_kwargs)
+        return vector_store.similarity_search(query, k=k, filter={"type": filter_type})
+    return vector_store.similarity_search(query, k=k)
 
 
 def get_knowledge_base_stats(
@@ -298,12 +296,12 @@ def clear_knowledge_base(
         True if successful, False otherwise.
     """
     try:
-        client = get_chroma_client(persist_dir)
-        try:
-            client.delete_collection(collection_name)
-        except Exception:
-            # Collection doesn't exist, that's fine
-            pass
+        vector_store = get_vector_store(collection_name, persist_dir)
+        collection = vector_store._collection
+        # Get all IDs and delete them
+        all_ids = collection.get()["ids"]
+        if all_ids:
+            collection.delete(ids=all_ids)
         return True
     except Exception:
         return False

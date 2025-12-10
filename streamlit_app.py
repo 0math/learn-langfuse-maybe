@@ -76,18 +76,12 @@ if st.sidebar.button("Sync Knowledge Base"):
 
 # Clear button
 if st.sidebar.button("Clear Knowledge Base"):
-    from agents.knowledge_base import DISCUSSIONS_COLLECTION, get_vector_store
-
     try:
-        vector_store = get_vector_store()
-        # Delete all documents from the collection
-        collection = vector_store._collection
-        # Get all IDs and delete them
-        all_ids = collection.get()["ids"]
-        if all_ids:
-            collection.delete(ids=all_ids)
-        st.sidebar.success("Knowledge base cleared")
-        update_kb_counter()
+        if clear_knowledge_base():
+            st.sidebar.success("Knowledge base cleared")
+            update_kb_counter()
+        else:
+            st.sidebar.error("Failed to clear knowledge base")
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
