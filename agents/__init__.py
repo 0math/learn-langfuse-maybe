@@ -8,12 +8,14 @@ from agents.knowledge_base import (
     index_discussions,
     search_knowledge_base,
 )
+from agents.langfuse_community import LangfuseCommunityAgent
 from agents.langfuse_docs import LangfuseDocsAgent
 from agents.langfuse_support import LangfuseSupportAgent
 
 __all__ = [
     "BaseAgent",
     "ControllerAgent",
+    "LangfuseCommunityAgent",
     "LangfuseDocsAgent",
     "LangfuseSupportAgent",
     "index_discussions",

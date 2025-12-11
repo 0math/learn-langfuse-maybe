@@ -25,44 +25,43 @@ This document describes the high-level architecture of the Langfuse learning pro
                     │         Tool-Based Routing          │
                     └──────────────────┬──────────────────┘
                                        │
-              ┌────────────────────────┼────────────────────────┐
-              │                        │                        │
-              ▼                        │                        ▼
-┌─────────────────────────┐            │          ┌─────────────────────────┐
-│   LangfuseDocsAgent     │            │          │  LangfuseSupportAgent   │
-│   (Documentation)       │            │          │  (Support/Community)    │
-│                         │            │          │                         │
-│  Tools:                 │            │          │  Tools:                 │
-│  • search_langfuse_docs │            │          │  • search_langfuse_     │
-│  • get_langfuse_docs_   │            │          │    support              │
-│    page                 │            │          │  • search_langfuse_     │
-│  • get_langfuse_        │            │          │    support_detailed     │
-│    overview             │            │          │  • search_knowledge_    │
-└───────────┬─────────────┘            │          │    base_tool            │
-            │                          │          │  • sync_knowledge_base  │
-            ▼                          │          │  • get_knowledge_base_  │
-┌─────────────────────────┐            │          │    status               │
-│    Langfuse MCP Server  │            │          └───────────┬─────────────┘
-│  https://langfuse.com/  │            │                      │
-│  api/mcp                │            │          ┌───────────┴───────────┐
-│                         │            │          │                       │
-│  • Semantic docs search │            │          ▼                       ▼
-│  • Page content fetch   │            │   ┌─────────────┐    ┌─────────────────┐
-│  • Overview/index       │            │   │ GitHub API  │    │   ChromaDB      │
-└─────────────────────────┘            │   │ (GraphQL)   │    │ (Knowledge Base)│
-                                       │   └─────────────┘    └─────────────────┘
-                                       │
-                    ┌──────────────────┴──────────────────┐
-                    │                                     │
-                    │           BaseAgent                 │
-                    │        (Abstract Class)             │
-                    │                                     │
-                    │  All agents inherit from this:      │
-                    │  • name: str (abstract)             │
-                    │  • description: str (abstract)      │
-                    │  • run(query) → str (abstract)      │
-                    │                                     │
-                    └─────────────────────────────────────┘
+       ┌───────────────────────────────┼───────────────────────────────┐
+       │                               │                               │
+       ▼                               ▼                               ▼
+┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+│  LangfuseDocsAgent   │    │ LangfuseSupportAgent │    │LangfuseCommunityAgent│
+│   (Documentation)    │    │  (GitHub Support)    │    │  (Self-Hosted Help)  │
+│                      │    │                      │    │                      │
+│  Tools:              │    │  Tools:              │    │  Tools:              │
+│  • search_langfuse_  │    │  • search_langfuse_  │    │  • search_reddit     │
+│    docs              │    │    support           │    │  • search_           │
+│  • get_langfuse_     │    │  • search_langfuse_  │    │    stackoverflow     │
+│    docs_page         │    │    support_detailed  │    │                      │
+│  • get_langfuse_     │    │  • search_knowledge_ │    │  Searches:           │
+│    overview          │    │    base_tool         │    │  • r/selfhosted      │
+│                      │    │  • sync_knowledge_   │    │  • r/LangChain       │
+└──────────┬───────────┘    │    base              │    │  • r/LocalLLaMA      │
+           │                │  • get_knowledge_    │    │  • StackOverflow     │
+           ▼                │    base_status       │    │    [langfuse] tag    │
+┌──────────────────────┐    └──────────┬───────────┘    └──────────┬───────────┘
+│  Langfuse MCP Server │               │                           │
+│  https://langfuse.   │    ┌──────────┴───────────┐    ┌──────────┴───────────┐
+│  com/api/mcp         │    │                      │    │                      │
+│                      │    ▼                      ▼    ▼                      ▼
+│  • Semantic search   │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+│  • Page fetch        │  │ GitHub   │  │ ChromaDB │  │  Reddit  │  │ Stack    │
+│  • Overview/index    │  │ GraphQL  │  │   (KB)   │  │ JSON API │  │ Overflow │
+└──────────────────────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘
+
+                    ┌─────────────────────────────────────────┐
+                    │           BaseAgent                     │
+                    │        (Abstract Class)                 │
+                    │                                         │
+                    │  All agents inherit from this:          │
+                    │  • name: str (abstract)                 │
+                    │  • description: str (abstract)          │
+                    │  • run(query) → str (abstract)          │
+                    └─────────────────────────────────────────┘
 ```
 
 ### Agent Descriptions
@@ -72,6 +71,7 @@ This document describes the high-level architecture of the Langfuse learning pro
 | **ControllerAgent** | Master router/orchestrator | Uses LangGraph ReAct pattern; wraps child agents as tools; system prompt fetched from Langfuse |
 | **LangfuseDocsAgent** | Official documentation queries | Calls Langfuse MCP server; searches and fetches docs pages |
 | **LangfuseSupportAgent** | Community support queries | Searches GitHub discussions; manages ChromaDB knowledge base |
+| **LangfuseCommunityAgent** | Self-hosted deployment help | Searches Reddit and StackOverflow; fallback for self-hosted questions |
 | **BaseAgent** | Abstract base class | Defines common interface (`name`, `description`, `run()`) |
 
 ### Data Flow: User Query
@@ -92,10 +92,17 @@ LLM decides which tool to call
        │                                    ▼
        │                           MCP Server → Response
        │
-       └─── "langfuse_support_agent" → LangfuseSupportAgent.run()
-                                               │
-                                               ├─── ChromaDB search
-                                               └─── GitHub API search
+       ├─── "langfuse_support_agent" → LangfuseSupportAgent.run()
+       │                                       │
+       │                                       ├─── ChromaDB search
+       │                                       └─── GitHub API search
+       │
+       └─── "langfuse_community_agent" → LangfuseCommunityAgent.run()
+                                                 │  (for self-hosted questions
+                                                 │   when others fail)
+                                                 │
+                                                 ├─── Reddit JSON API
+                                                 └─── StackOverflow API
        │
        ▼
 Response streamed back to UI
@@ -281,5 +288,7 @@ Response streamed back to UI
 |---------|---------|----------|
 | **Langfuse MCP** | Official docs search | `https://langfuse.com/api/mcp` |
 | **GitHub GraphQL** | Support discussions | `https://api.github.com/graphql` |
+| **Reddit JSON API** | Community discussions | `https://www.reddit.com/r/{subreddit}/search.json` |
+| **StackExchange API** | Q&A search | `https://api.stackexchange.com/2.3` |
 | **Langfuse Cloud** | Tracing & prompts | Configured via env vars |
 | **OpenAI API** | LLM (`gpt-4o-mini`) + Embeddings | Configured via API key |

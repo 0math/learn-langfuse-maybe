@@ -10,6 +10,7 @@ from langfuse import get_client
 from langgraph.prebuilt import create_react_agent
 
 from agents.base import BaseAgent
+from agents.langfuse_community import LangfuseCommunityAgent
 from agents.langfuse_docs import LangfuseDocsAgent
 from agents.langfuse_support import LangfuseSupportAgent
 
@@ -51,6 +52,9 @@ class ControllerAgent(BaseAgent):
         self._support_agent = LangfuseSupportAgent(
             llm=self.llm, langfuse_handler=self.langfuse_handler
         )
+        self._community_agent = LangfuseCommunityAgent(
+            llm=self.llm, langfuse_handler=self.langfuse_handler
+        )
 
         # Create tools that delegate to the existing agents
         @tool
@@ -85,7 +89,28 @@ class ControllerAgent(BaseAgent):
             """
             return self._support_agent.run(query)
 
-        self.tools = [langfuse_docs_agent, langfuse_support_agent]
+        @tool
+        def langfuse_community_agent(query: str) -> str:
+            """Query the Langfuse Community Agent for self-hosted deployment questions.
+
+            Use this ONLY for self-hosted Langfuse questions when:
+            - The docs agent didn't have relevant information about self-hosting
+            - The support agent didn't find helpful GitHub discussions
+            - The question is specifically about deploying or configuring self-hosted Langfuse
+
+            Searches Reddit (r/selfhosted, r/LangChain, r/LocalLLaMA) and StackOverflow
+            for community solutions and deployment experiences.
+
+            Args:
+                query: The user's question about Langfuse self-hosted deployment.
+            """
+            return self._community_agent.run(query)
+
+        self.tools = [
+            langfuse_docs_agent,
+            langfuse_support_agent,
+            langfuse_community_agent,
+        ]
         self.agent = create_react_agent(self.llm, self.tools)
 
     @property
