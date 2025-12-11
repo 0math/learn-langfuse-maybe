@@ -67,12 +67,14 @@ This document describes the high-level architecture of the Langfuse learning pro
 
 ### Agent Descriptions
 
-| Agent | Role | Key Features |
-|-------|------|--------------|
-| **ControllerAgent** | Master router/orchestrator | Uses LangGraph ReAct pattern; wraps child agents as tools; system prompt fetched from Langfuse |
-| **LangfuseDocsAgent** | Official documentation queries | Calls Langfuse MCP server; searches and fetches docs pages |
-| **LangfuseSupportAgent** | Community support queries | Searches GitHub discussions; manages ChromaDB knowledge base |
-| **BaseAgent** | Abstract base class | Defines common interface (`name`, `description`, `run()`) |
+| Agent | Role | Tag | Key Features |
+|-------|------|-----|--------------|
+| **ControllerAgent** | Master router/orchestrator | - | Uses LangGraph ReAct pattern; wraps child agents as tools; system prompt fetched from Langfuse |
+| **LangfuseDocsAgent** | Official documentation queries | `docs-agent` | Calls Langfuse MCP server; searches and fetches docs pages |
+| **LangfuseSupportAgent** | Community support queries | `support-agent` | Searches GitHub discussions; manages ChromaDB knowledge base |
+| **BaseAgent** | Abstract base class | - | Defines common interface (`name`, `description`, `run()`) |
+
+> **Filtering by Agent**: Use the agent tags (`docs-agent`, `support-agent`) in Langfuse UI to filter traces by which agent handled the query.
 
 ### Data Flow: User Query
 
@@ -275,11 +277,143 @@ Response streamed back to UI
 
 ---
 
+## Part 3: Langfuse Instrumentation
+
+### Trace Attributes
+
+The application tracks the following attributes in Langfuse:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      LANGFUSE TRACE ATTRIBUTES                          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Trace Level                                                    │
+    │                                                                 │
+    │  • session_id    - Groups traces by browser session (UUID)      │
+    │  • user_id       - Identifies user (user_{8-char-hex})          │
+    │  • trace_id      - Unique trace identifier (from callback)      │
+    │  • langfuse_prompt - Links to prompt version for metrics        │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Observation Level (Agent Tags)                                 │
+    │                                                                 │
+    │  • docs-agent    - Tag for LangfuseDocsAgent traces             │
+    │  • support-agent - Tag for LangfuseSupportAgent traces          │
+    │  • MCP docs error - Tag for MCP tool failures                   │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+```
+
+### Instrumentation Flow
+
+```
+    Streamlit App
+         │
+         ├─── get_session_id() → UUID per browser session
+         ├─── get_user_id()    → "user_{8-char-hex}" per session
+         │
+         ▼
+    ControllerAgent(session_id, user_id)
+         │
+         ├─── Fetches prompt from Langfuse (with prompt object)
+         │
+         ▼
+    _get_config(prompt_object)
+         │
+         ├─── metadata["langfuse_session_id"] = session_id
+         ├─── metadata["langfuse_user_id"]    = user_id
+         ├─── metadata["langfuse_prompt"]     = prompt_object
+         │
+         ▼
+    agent.invoke(..., config=config)
+         │
+         ▼
+    LangfuseCallbackHandler → Langfuse Cloud
+         │
+         ├─── Trace with session/user/prompt linked
+         └─── Observations with agent tags
+```
+
+### Prompt Linking
+
+The system prompt is fetched from Langfuse and linked to traces:
+
+| Step | Code Location | Description |
+|------|---------------|-------------|
+| 1. Fetch | `controller.py:_get_system_prompt()` | Gets prompt from Langfuse by name + label |
+| 2. Return | Returns `(content, prompt_object)` | Both compiled content and raw prompt object |
+| 3. Pass | `controller.py:_get_config()` | Adds `langfuse_prompt` to metadata |
+| 4. Link | LangfuseCallbackHandler | Links prompt version to trace for metrics |
+
+---
+
+## Part 4: Streamlit UI Features
+
+### Empty Chat State
+
+When no chat history exists, the app displays:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         EMPTY CHAT STATE                                │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Welcome to Learn Langfuse Maybe                                │
+    │  Ask me anything about Langfuse...                              │
+    └─────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Popular in the Community                                       │
+    │                                                                 │
+    │  "Users often ask about {topic} ({count} comments)..."          │
+    │  [Link to most active discussion]                               │
+    │                                                                 │
+    │  ▼ View top discussions                                         │
+    │    1. [Discussion Title] (N comments)                           │
+    │    2. [Discussion Title] (N comments)                           │
+    │    3. [Discussion Title] (N comments)                           │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Learn the Basics                                               │
+    │                                                                 │
+    │  ┌─────────────────────┐    ┌─────────────────────┐            │
+    │  │ Langfuse Variables  │    │ Prompt Management   │            │
+    │  │                     │    │                     │            │
+    │  │ LANGFUSE_SECRET_KEY │    │ Create, version,    │            │
+    │  │ LANGFUSE_PUBLIC_KEY │    │ and deploy prompts  │            │
+    │  │ LANGFUSE_HOST       │    │                     │            │
+    │  │                     │    │ [Link to docs]      │            │
+    │  │ [Quick Start Guide] │    │                     │            │
+    │  └─────────────────────┘    └─────────────────────┘            │
+    │                                                                 │
+    └─────────────────────────────────────────────────────────────────┘
+```
+
+### Data Sources for Empty State
+
+| Component | Source | Caching |
+|-----------|--------|---------|
+| Popular Discussions | GitHub GraphQL API | 1 hour (st.cache_data) |
+| Topic Summary | Keyword analysis of titles | Derived from cached data |
+| Documentation Links | Static URLs | None needed |
+
+---
+
 ## External Integrations
 
 | Service | Purpose | Endpoint |
 |---------|---------|----------|
 | **Langfuse MCP** | Official docs search | `https://langfuse.com/api/mcp` |
 | **GitHub GraphQL** | Support discussions | `https://api.github.com/graphql` |
-| **Langfuse Cloud** | Tracing & prompts | Configured via env vars |
+| **Langfuse Cloud** | Tracing, prompts, metrics | Configured via env vars |
 | **OpenAI API** | LLM (`gpt-4o-mini`) + Embeddings | Configured via API key |

@@ -1,7 +1,9 @@
 import os
 import time
 import uuid
+from typing import Optional
 
+import httpx
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai.chat_models import ChatOpenAI
@@ -17,10 +19,201 @@ from agents import (
 )
 from agents.langfuse_support import fetch_all_support_discussions
 
+# GitHub API configuration for fetching popular discussions
+GITHUB_API_URL = "https://api.github.com/graphql"
+LANGFUSE_REPO_OWNER = "langfuse"
+LANGFUSE_REPO_NAME = "langfuse"
+
 load_dotenv()
 
 # Initialize Langfuse client for tracing
 langfuse = get_client()
+
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def fetch_popular_discussions(limit: int = 3) -> list[dict]:
+    """Fetch most popular GitHub discussions from the Support category.
+
+    Sorts by comment count as a proxy for popularity/engagement.
+
+    Args:
+        limit: Number of discussions to return.
+
+    Returns:
+        List of discussion dicts with title, url, comment_count, and topic.
+    """
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        return []
+
+    graphql_query = """
+    query PopularDiscussions($owner: String!, $repo: String!, $first: Int!) {
+      repository(owner: $owner, name: $repo) {
+        discussions(
+          first: $first,
+          categoryId: null,
+          orderBy: {field: UPDATED_AT, direction: DESC}
+        ) {
+          nodes {
+            title
+            url
+            comments {
+              totalCount
+            }
+            category {
+              name
+              slug
+            }
+            labels(first: 5) {
+              nodes {
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(
+                GITHUB_API_URL,
+                json={
+                    "query": graphql_query,
+                    "variables": {
+                        "owner": LANGFUSE_REPO_OWNER,
+                        "repo": LANGFUSE_REPO_NAME,
+                        "first": 50,  # Fetch more to filter and sort
+                    },
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {github_token}",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            discussions = (
+                data.get("data", {})
+                .get("repository", {})
+                .get("discussions", {})
+                .get("nodes", [])
+            )
+
+            # Filter to support category and sort by comment count
+            support_discussions = [
+                {
+                    "title": d["title"],
+                    "url": d["url"],
+                    "comment_count": d["comments"]["totalCount"],
+                    "labels": [l["name"] for l in d.get("labels", {}).get("nodes", [])],
+                }
+                for d in discussions
+                if d and d.get("category", {}).get("slug") == "support"
+            ]
+
+            # Sort by comment count (most engaged first)
+            support_discussions.sort(key=lambda x: x["comment_count"], reverse=True)
+
+            return support_discussions[:limit]
+
+    except Exception:
+        return []
+
+
+def get_popular_topics_summary() -> Optional[dict]:
+    """Get a summary of popular discussion topics.
+
+    Returns:
+        Dict with total_count, topic_summary, and top_discussion, or None if unavailable.
+    """
+    discussions = fetch_popular_discussions(limit=3)
+
+    if not discussions:
+        return None
+
+    total_comments = sum(d["comment_count"] for d in discussions)
+    top_discussion = discussions[0] if discussions else None
+
+    # Extract a common theme from titles (simplified)
+    titles = [d["title"].lower() for d in discussions]
+    common_topics = []
+    keywords = [
+        "tracing",
+        "integration",
+        "error",
+        "setup",
+        "sdk",
+        "python",
+        "langchain",
+    ]
+    for keyword in keywords:
+        if any(keyword in title for title in titles):
+            common_topics.append(keyword)
+
+    topic_summary = common_topics[0] if common_topics else "common issues"
+
+    return {
+        "total_count": total_comments,
+        "topic_summary": topic_summary,
+        "top_discussion": top_discussion,
+        "discussions": discussions,
+    }
+
+
+def render_empty_chat_state():
+    """Render the empty chat state with statistics and helpful links."""
+    st.markdown("### Welcome to LLM")
+    st.markdown(
+        "Ask me anything about Langfuse - I can search the official docs and community discussions"
+    )
+
+    st.markdown("---")
+
+    # Popular discussions section
+    popular = get_popular_topics_summary()
+    if popular and popular["top_discussion"]:
+        top = popular["top_discussion"]
+        st.markdown("#### Popular in the Community")
+        st.markdown(
+            f"Users often ask about **{popular['topic_summary']}** "
+            f"({popular['total_count']} comments across top discussions). "
+            f"[See the most active discussion]({top['url']})"
+        )
+
+        with st.expander("View top discussions"):
+            for i, d in enumerate(popular["discussions"], 1):
+                st.markdown(
+                    f"{i}. [{d['title']}]({d['url']}) ({d['comment_count']} comments)"
+                )
+
+    # Learn the basics section
+    st.markdown("#### Learn the Basics")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Langfuse Variables**")
+        st.code(
+            """# Environment variables
+LANGFUSE_SECRET_KEY="sk-lf-..."
+LANGFUSE_PUBLIC_KEY="pk-lf-..."
+LANGFUSE_HOST="https://cloud.langfuse.com"
+""",
+            language="bash",
+        )
+        st.markdown("[Quick Start Guide](https://langfuse.com/docs/get-started)")
+
+    with col2:
+        st.markdown("**Prompt Management**")
+        st.markdown(
+            "Create, version, and deploy prompts independently from your application code."
+        )
+        st.markdown(
+            "[Prompt Management Docs](https://langfuse.com/docs/prompts/get-started)"
+        )
 
 
 def get_session_id() -> str:
@@ -200,10 +393,13 @@ def generate_response(input_text: str, history: list[dict[str, str]]) -> tuple:
     return response or "No response received from the agent.", agent.last_trace_id
 
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Display chat history or empty state
+if not st.session_state.messages:
+    render_empty_chat_state()
+else:
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
 # Chat input
 if prompt := st.chat_input("Ask a question about Langfuse..."):
