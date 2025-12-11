@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -20,6 +21,25 @@ load_dotenv()
 
 # Initialize Langfuse client for tracing
 langfuse = get_client()
+
+
+def get_session_id() -> str:
+    """Get or create a session ID for the current Streamlit session."""
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    return st.session_state.session_id
+
+
+def get_user_id() -> str:
+    """Get or create a user ID for the current Streamlit session.
+
+    In a real application, this would come from authentication.
+    For now, we generate a persistent ID per browser session.
+    """
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = f"user_{uuid.uuid4().hex[:8]}"
+    return st.session_state.user_id
+
 
 st.title("Learn Langfuse Maybe (LLM)")
 
@@ -97,8 +117,14 @@ st.sidebar.markdown(
 )
 
 
-def get_agent(api_key: str):
-    """Get the controller agent that automatically routes to specialized agents."""
+def get_agent(api_key: str, session_id: str, user_id: str):
+    """Get the controller agent that automatically routes to specialized agents.
+
+    Args:
+        api_key: OpenAI API key.
+        session_id: Session ID for Langfuse tracing.
+        user_id: User ID for Langfuse tracing.
+    """
     # Create Langfuse callback handler for tracing LangChain/LangGraph calls
     langfuse_handler = LangfuseCallbackHandler()
 
@@ -106,13 +132,18 @@ def get_agent(api_key: str):
         model="gpt-4o-mini",
         temperature=0.7,
         api_key=SecretStr(api_key),
-        callbacks=[langfuse_handler],  # Trace all LLM calls
+        callbacks=[langfuse_handler],
     )
 
-    return ControllerAgent(llm=llm, langfuse_handler=langfuse_handler)
+    return ControllerAgent(
+        llm=llm,
+        langfuse_handler=langfuse_handler,
+        session_id=session_id,
+        user_id=user_id,
+    )
 
 
-def generate_response(input_text: str, history: list[dict[str, str]]) -> str:
+def generate_response(input_text: str, history: list[dict[str, str]]) -> tuple:
     """Generate response using the controller agent with streaming status.
 
     Args:
@@ -120,9 +151,11 @@ def generate_response(input_text: str, history: list[dict[str, str]]) -> str:
         history: Conversation history (list of {"role": "user"|"assistant", "content": "..."}).
 
     Returns:
-        The agent's response.
+        Tuple of (agent's response, trace_id or None).
     """
-    agent = get_agent(openai_api_key)
+    session_id = get_session_id()
+    user_id = get_user_id()
+    agent = get_agent(openai_api_key, session_id, user_id)
 
     # Create a status container for showing tool execution
     status_container = st.status("Processing...", expanded=True)
@@ -164,7 +197,7 @@ def generate_response(input_text: str, history: list[dict[str, str]]) -> str:
     # Flush Langfuse events to ensure traces are sent
     langfuse.flush()
 
-    return response or "No response received from the agent."
+    return response or "No response received from the agent.", agent.last_trace_id
 
 
 # Display chat history
@@ -183,12 +216,16 @@ if prompt := st.chat_input("Ask a question about Langfuse..."):
 
         # Generate response with conversation history (before adding current message)
         with st.chat_message("assistant"):
-            response = generate_response(prompt, history=st.session_state.messages)
+            response, trace_id = generate_response(
+                prompt, history=st.session_state.messages
+            )
             st.markdown(response)
 
-        # Add both messages to history after generation
+        # Add both messages to history after generation (include trace_id in metadata)
         st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append(
+            {"role": "assistant", "content": response, "trace_id": trace_id}
+        )
 
         # Update knowledge base counter (may have changed during sync_knowledge_base tool)
         update_kb_counter()

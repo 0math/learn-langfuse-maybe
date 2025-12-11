@@ -429,6 +429,9 @@ def get_knowledge_base_status() -> str:
 class LangfuseSupportAgent(BaseAgent):
     """Agent that searches Langfuse GitHub Discussions for support answers."""
 
+    # Tag for identifying this agent's traces in Langfuse
+    AGENT_TAG = "support-agent"
+
     def __init__(self, llm: BaseChatModel, **kwargs: Any):
         """Initialize the Langfuse support agent.
 
@@ -451,6 +454,15 @@ class LangfuseSupportAgent(BaseAgent):
         self.agent = create_react_agent(self.llm, self.tools)
         # Store callbacks for agent invocation
         self._callbacks = [self.langfuse_handler] if self.langfuse_handler else []
+
+    def _get_config(self) -> dict:
+        """Build config with callbacks and agent tag for Langfuse tracing."""
+        config: dict = {}
+        if self._callbacks:
+            config["callbacks"] = self._callbacks
+        # Add agent tag for filtering in Langfuse UI
+        config["metadata"] = {"langfuse_tags": [self.AGENT_TAG]}
+        return config
 
     @property
     def name(self) -> str:
@@ -538,8 +550,8 @@ Always cite the discussion URLs when referencing solutions."""
 
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=query)]
 
-        # Invoke agent with Langfuse callback for tracing
-        config = {"callbacks": self._callbacks} if self._callbacks else {}
+        # Invoke agent with Langfuse callback and tags for tracing
+        config = self._get_config()
         result = self.agent.invoke({"messages": messages}, config=config)
 
         if result.get("messages"):
