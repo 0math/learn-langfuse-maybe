@@ -7,11 +7,15 @@ import httpx
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from langfuse import get_client
 from langgraph.prebuilt import create_react_agent
 
 from agents.base import BaseAgent
 
 MCP_ENDPOINT = "https://langfuse.com/api/mcp"
+
+# Get Langfuse client for error tracking
+_langfuse = get_client()
 
 
 def _parse_sse_response(text: str) -> dict:
@@ -27,6 +31,35 @@ def _parse_sse_response(text: str) -> dict:
         if line.startswith("data: "):
             return json.loads(line[6:])
     return {}
+
+
+def _track_mcp_error(
+    tool_name: str, error_message: str, error_details: Any = None
+) -> None:
+    """Track MCP error in Langfuse with appropriate tags and level.
+
+    Args:
+        tool_name: Name of the MCP tool that failed.
+        error_message: The error message.
+        error_details: Additional error details.
+    """
+    try:
+        # Update current span with error information
+        _langfuse.update_current_span(
+            level="ERROR",
+            status_message=f"MCP docs error: {error_message}",
+            metadata={
+                "mcp_tool": tool_name,
+                "error_details": error_details,
+            },
+        )
+        # Update trace with error tag
+        _langfuse.update_current_trace(
+            tags=["MCP docs error"],
+        )
+    except Exception:
+        # Silently fail if not in a trace context
+        pass
 
 
 def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
@@ -46,33 +79,45 @@ def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         "params": {"name": tool_name, "arguments": arguments},
     }
 
-    with httpx.Client(timeout=60.0) as client:
-        response = client.post(
-            MCP_ENDPOINT,
-            json=request_body,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-        )
-        response.raise_for_status()
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                MCP_ENDPOINT,
+                json=request_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+            response.raise_for_status()
 
-        # Handle SSE (text/event-stream) or JSON response
-        content_type = response.headers.get("content-type", "")
-        if "text/event-stream" in content_type:
-            result = _parse_sse_response(response.text)
-        else:
-            result = response.json()
+            # Handle SSE (text/event-stream) or JSON response
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" in content_type:
+                result = _parse_sse_response(response.text)
+            else:
+                result = response.json()
 
-        if "result" in result:
-            content = result["result"].get("content", [])
-            if content and isinstance(content, list):
-                return content[0].get("text", str(content))
-            return str(content)
-        elif "error" in result:
-            return f"MCP Error: {result['error']}"
+            if "result" in result:
+                content = result["result"].get("content", [])
+                if content and isinstance(content, list):
+                    return content[0].get("text", str(content))
+                return str(content)
+            elif "error" in result:
+                error_msg = f"MCP Error: {result['error']}"
+                _track_mcp_error(tool_name, error_msg, result["error"])
+                return error_msg
 
-        return str(result)
+            return str(result)
+
+    except httpx.HTTPStatusError as e:
+        error_msg = f"MCP HTTP error: {e.response.status_code}"
+        _track_mcp_error(tool_name, error_msg, {"status_code": e.response.status_code})
+        raise
+    except httpx.RequestError as e:
+        error_msg = f"MCP request error: {str(e)}"
+        _track_mcp_error(tool_name, error_msg, {"error_type": type(e).__name__})
+        raise
 
 
 @tool
@@ -120,6 +165,9 @@ def get_langfuse_overview() -> str:
 class LangfuseDocsAgent(BaseAgent):
     """Agent that queries Langfuse documentation via MCP HTTP endpoint."""
 
+    # Tag for identifying this agent's traces in Langfuse
+    AGENT_TAG = "docs-agent"
+
     def __init__(self, llm: BaseChatModel, **kwargs: Any):
         """Initialize the Langfuse docs agent.
 
@@ -140,6 +188,15 @@ class LangfuseDocsAgent(BaseAgent):
         self.agent = create_react_agent(self.llm, self.tools)
         # Store callbacks for agent invocation
         self._callbacks = [self.langfuse_handler] if self.langfuse_handler else []
+
+    def _get_config(self) -> dict:
+        """Build config with callbacks and agent tag for Langfuse tracing."""
+        config: dict = {}
+        if self._callbacks:
+            config["callbacks"] = self._callbacks
+        # Add agent tag for filtering in Langfuse UI
+        config["metadata"] = {"langfuse_tags": [self.AGENT_TAG]}
+        return config
 
     @property
     def name(self) -> str:
@@ -170,8 +227,8 @@ If you cannot find relevant information, say so clearly."""
 
         messages = [SystemMessage(content=system_prompt), HumanMessage(content=query)]
 
-        # Invoke agent with Langfuse callback for tracing
-        config = {"callbacks": self._callbacks} if self._callbacks else {}
+        # Invoke agent with Langfuse callback and tags for tracing
+        config = self._get_config()
         result = self.agent.invoke({"messages": messages}, config=config)
 
         if result.get("messages"):

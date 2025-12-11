@@ -22,12 +22,19 @@ class ControllerAgent(BaseAgent):
 
     This agent uses a tool-calling pattern where specialized agents are wrapped
     as tools. The controller decides which agent to invoke based on the query.
+
+    Attributes:
+        session_id: Session ID for Langfuse tracing.
+        user_id: User ID for Langfuse tracing.
+        last_trace_id: The trace ID from the most recent execution (available after run/stream).
     """
 
     def __init__(
         self,
         llm: BaseChatModel,
         langfuse_handler: Optional[BaseCallbackHandler] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         **kwargs: Any,
     ):
         """Initialize the controller agent.
@@ -35,9 +42,14 @@ class ControllerAgent(BaseAgent):
         Args:
             llm: The language model to use.
             langfuse_handler: Optional Langfuse callback handler for tracing.
+            session_id: Optional session ID for Langfuse tracing.
+            user_id: Optional user ID for Langfuse tracing.
             **kwargs: Additional configuration.
         """
         super().__init__(llm, langfuse_handler, **kwargs)
+        self.session_id = session_id
+        self.user_id = user_id
+        self.last_trace_id: Optional[str] = None
         self._setup_agent()
 
     def _setup_agent(self) -> None:
@@ -147,6 +159,34 @@ class ControllerAgent(BaseAgent):
 
         return messages
 
+    def _get_config(self) -> dict:
+        """Build the config dict with callbacks and metadata for Langfuse tracing.
+
+        Sets trace attributes via LangChain config metadata:
+        - langfuse_session_id: Groups traces by session
+        - langfuse_user_id: Associates traces with a user
+        """
+        config: dict = {}
+        if self._callbacks:
+            config["callbacks"] = self._callbacks
+
+        # Build metadata for Langfuse v3 LangChain integration
+        metadata: dict = {}
+        if self.session_id:
+            metadata["langfuse_session_id"] = self.session_id
+        if self.user_id:
+            metadata["langfuse_user_id"] = self.user_id
+
+        if metadata:
+            config["metadata"] = metadata
+
+        return config
+
+    def _update_trace_id(self) -> None:
+        """Update last_trace_id from the Langfuse callback handler after execution."""
+        if self.langfuse_handler and hasattr(self.langfuse_handler, "last_trace_id"):
+            self.last_trace_id = self.langfuse_handler.last_trace_id
+
     def run(self, query: str, history: Optional[list[dict[str, str]]] = None) -> str:
         """Execute a query by routing to the appropriate specialized agent.
 
@@ -159,8 +199,11 @@ class ControllerAgent(BaseAgent):
         """
         messages = self._build_messages(query, history)
 
-        config = {"callbacks": self._callbacks} if self._callbacks else {}
+        config = self._get_config()
         result = self.agent.invoke({"messages": messages}, config=config)
+
+        # Capture trace ID after execution
+        self._update_trace_id()
 
         if result.get("messages"):
             return result["messages"][-1].content
@@ -184,7 +227,7 @@ class ControllerAgent(BaseAgent):
         """
         messages = self._build_messages(query, history)
 
-        config = {"callbacks": self._callbacks} if self._callbacks else {}
+        config = self._get_config()
 
         final_response = None
 
@@ -201,6 +244,9 @@ class ControllerAgent(BaseAgent):
                             yield tool_name
                     elif isinstance(msg, AIMessage) and msg.content:
                         final_response = msg.content
+
+        # Capture trace ID after execution
+        self._update_trace_id()
 
         if final_response:
             yield f"__FINAL__{final_response}"
