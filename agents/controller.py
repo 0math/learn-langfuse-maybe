@@ -108,14 +108,17 @@ class ControllerAgent(BaseAgent):
     def description(self) -> str:
         return "Routes queries to specialized Langfuse agents (Docs or Support)"
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self) -> tuple:
         """Get the system prompt for the controller agent from Langfuse.
 
         Supports both text and chat prompts. For chat prompts, extracts the
         system message content.
+
+        Returns:
+            Tuple of (prompt_content: str, prompt_object) for linking to traces.
         """
         langfuse = get_client()
-        prompt = langfuse.get_prompt(CONTROLLER_PROMPT_NAME)
+        prompt = langfuse.get_prompt(CONTROLLER_PROMPT_NAME, label="production")
         compiled = prompt.compile()
 
         # Handle chat prompts (returns list of messages)
@@ -123,18 +126,18 @@ class ControllerAgent(BaseAgent):
             # Find the system message in the chat prompt
             for msg in compiled:
                 if isinstance(msg, dict) and msg.get("role") == "system":
-                    return msg.get("content", "")
+                    return msg.get("content", ""), prompt
             # Fallback: use first message content if no system role found
             if compiled and isinstance(compiled[0], dict):
-                return compiled[0].get("content", "")
-            return ""
+                return compiled[0].get("content", ""), prompt
+            return "", prompt
 
         # Handle text prompts (returns string)
-        return compiled
+        return compiled, prompt
 
     def _build_messages(
         self, query: str, history: Optional[list[dict[str, str]]] = None
-    ) -> list[BaseMessage]:
+    ) -> tuple:
         """Build the message list including system prompt and conversation history.
 
         Args:
@@ -142,9 +145,10 @@ class ControllerAgent(BaseAgent):
             history: Optional list of previous messages with 'role' and 'content' keys.
 
         Returns:
-            List of BaseMessage objects for the agent.
+            Tuple of (messages: list[BaseMessage], prompt_object) for linking to traces.
         """
-        messages: list[BaseMessage] = [SystemMessage(content=self._get_system_prompt())]
+        system_prompt_content, prompt_object = self._get_system_prompt()
+        messages: list[BaseMessage] = [SystemMessage(content=system_prompt_content)]
 
         # Add conversation history
         if history:
@@ -157,14 +161,18 @@ class ControllerAgent(BaseAgent):
         # Add current query
         messages.append(HumanMessage(content=query))
 
-        return messages
+        return messages, prompt_object
 
-    def _get_config(self) -> dict:
+    def _get_config(self, prompt_object: Optional[Any] = None) -> dict:
         """Build the config dict with callbacks and metadata for Langfuse tracing.
 
         Sets trace attributes via LangChain config metadata:
         - langfuse_session_id: Groups traces by session
         - langfuse_user_id: Associates traces with a user
+        - langfuse_prompt: Links the prompt to the trace for metrics tracking
+
+        Args:
+            prompt_object: Optional Langfuse prompt object to link to the trace.
         """
         config: dict = {}
         if self._callbacks:
@@ -176,6 +184,8 @@ class ControllerAgent(BaseAgent):
             metadata["langfuse_session_id"] = self.session_id
         if self.user_id:
             metadata["langfuse_user_id"] = self.user_id
+        if prompt_object:
+            metadata["langfuse_prompt"] = prompt_object
 
         if metadata:
             config["metadata"] = metadata
@@ -197,9 +207,9 @@ class ControllerAgent(BaseAgent):
         Returns:
             The agent's response.
         """
-        messages = self._build_messages(query, history)
+        messages, prompt_object = self._build_messages(query, history)
 
-        config = self._get_config()
+        config = self._get_config(prompt_object)
         result = self.agent.invoke({"messages": messages}, config=config)
 
         # Capture trace ID after execution
@@ -225,9 +235,9 @@ class ControllerAgent(BaseAgent):
         Yields:
             Tool names as they are invoked, and finally the response.
         """
-        messages = self._build_messages(query, history)
+        messages, prompt_object = self._build_messages(query, history)
 
-        config = self._get_config()
+        config = self._get_config(prompt_object)
 
         final_response = None
 
