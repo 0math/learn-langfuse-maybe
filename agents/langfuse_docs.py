@@ -92,14 +92,14 @@ def search_langfuse_docs(query: str) -> str:
 
 
 @tool
-def get_langfuse_docs_page(path: str) -> str:
+def get_langfuse_docs_page(pathOrUrl: str) -> str:
     """Get raw Markdown content for a specific Langfuse documentation page.
 
     Args:
-        path: The docs path (e.g., "/docs/get-started") or full URL.
+        pathOrUrl: The docs path (e.g., "/docs/get-started") or full URL.
     """
     try:
-        return _call_mcp_tool("getLangfuseDocsPage", {"path": path})
+        return _call_mcp_tool("getLangfuseDocsPage", {"pathOrUrl": pathOrUrl})
     except Exception as e:
         return f"Error fetching page: {str(e)}"
 
