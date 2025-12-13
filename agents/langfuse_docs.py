@@ -1,6 +1,7 @@
 """Langfuse documentation agent using MCP HTTP endpoint."""
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -9,13 +10,18 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langfuse import get_client
 from langgraph.prebuilt import create_react_agent
+from markdownify import markdownify as md
 
 from agents.base import BaseAgent
 
 MCP_ENDPOINT = "https://langfuse.com/api/mcp"
+LANGFUSE_DOCS_BASE = "https://langfuse.com"
+LANGFUSE_LLMS_TXT = "https://langfuse.com/llms.txt"
 
-# Get Langfuse client for error tracking
-_langfuse = get_client()
+
+def _get_langfuse_client():
+    """Get Langfuse client lazily to avoid initialization before env vars are loaded."""
+    return get_client()
 
 
 def _parse_sse_response(text: str) -> dict:
@@ -44,8 +50,9 @@ def _track_mcp_error(
         error_details: Additional error details.
     """
     try:
+        langfuse = _get_langfuse_client()
         # Update current span with error information
-        _langfuse.update_current_span(
+        langfuse.update_current_span(
             level="ERROR",
             status_message=f"MCP docs error: {error_message}",
             metadata={
@@ -54,12 +61,81 @@ def _track_mcp_error(
             },
         )
         # Update trace with error tag
-        _langfuse.update_current_trace(
+        langfuse.update_current_trace(
             tags=["MCP docs error"],
         )
     except Exception:
         # Silently fail if not in a trace context
         pass
+
+
+def _fetch_docs_page_directly(path_or_url: str) -> str:
+    """Fetch a Langfuse docs page directly via HTTP as fallback.
+
+    Args:
+        path_or_url: The docs path (e.g., "/docs/get-started") or full URL.
+
+    Returns:
+        The page content converted to markdown.
+
+    Raises:
+        httpx.HTTPError: If the request fails.
+    """
+    # Normalize the URL
+    if path_or_url.startswith("http"):
+        url = path_or_url
+    else:
+        # Ensure path starts with /
+        if not path_or_url.startswith("/"):
+            path_or_url = "/" + path_or_url
+        url = f"{LANGFUSE_DOCS_BASE}{path_or_url}"
+
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        response = client.get(
+            url,
+            headers={
+                "Accept": "text/html",
+                "User-Agent": "LangfuseDocsAgent/1.0",
+            },
+        )
+        response.raise_for_status()
+
+        # Convert HTML to markdown
+        html_content = response.text
+
+        # Extract main content area if possible (look for article or main tags)
+        main_match = re.search(
+            r"<(article|main)[^>]*>(.*?)</\1>", html_content, re.DOTALL | re.IGNORECASE
+        )
+        if main_match:
+            html_content = main_match.group(2)
+
+        # Convert to markdown
+        markdown_content = md(
+            html_content,
+            heading_style="ATX",
+            strip=["script", "style", "nav", "footer"],
+        )
+
+        # Clean up excessive whitespace
+        markdown_content = re.sub(r"\n{3,}", "\n\n", markdown_content)
+
+        return markdown_content.strip()
+
+
+def _fetch_llms_txt_directly() -> str:
+    """Fetch the llms.txt file directly as fallback.
+
+    Returns:
+        The content of llms.txt.
+
+    Raises:
+        httpx.HTTPError: If the request fails.
+    """
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(LANGFUSE_LLMS_TXT)
+        response.raise_for_status()
+        return response.text
 
 
 def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
@@ -131,9 +207,57 @@ def search_langfuse_docs(query: str) -> str:
         query: The search query about Langfuse.
     """
     try:
-        return _call_mcp_tool("searchLangfuseDocs", {"query": query})
+        result = _call_mcp_tool("searchLangfuseDocs", {"query": query})
+        # Check if result indicates an error
+        if result.startswith("MCP Error:"):
+            raise Exception(result)
+        return result
     except Exception as e:
-        return f"Error searching docs: {str(e)}"
+        # Fallback: fetch the docs overview and relevant pages directly
+        _track_mcp_error(
+            "searchLangfuseDocs", str(e), {"query": query, "fallback": True}
+        )
+        try:
+            # Get the llms.txt to find relevant pages
+            overview = _fetch_llms_txt_directly()
+            # Try to find relevant doc paths from llms.txt based on query keywords
+            query_lower = query.lower()
+            relevant_paths = []
+            for line in overview.split("\n"):
+                if line.startswith("- [") or line.startswith("  - ["):
+                    # Extract path from markdown link format
+                    match = re.search(r"\]\((/[^)]+)\)", line)
+                    if match:
+                        path = match.group(1)
+                        line_lower = line.lower()
+                        # Check if any query word appears in the line
+                        if any(
+                            word in line_lower
+                            for word in query_lower.split()
+                            if len(word) > 2
+                        ):
+                            relevant_paths.append(path)
+
+            if relevant_paths:
+                # Fetch up to 3 most relevant pages
+                contents = []
+                for path in relevant_paths[:3]:
+                    try:
+                        content = _fetch_docs_page_directly(path)
+                        contents.append(f"## From {path}\n\n{content[:2000]}...")
+                    except Exception:
+                        continue
+                if contents:
+                    return f"[Fallback: Direct docs fetch]\n\n" + "\n\n---\n\n".join(
+                        contents
+                    )
+
+            # If no relevant paths found, return overview
+            return (
+                f"[Fallback: Direct docs fetch]\n\nDocumentation overview:\n{overview}"
+            )
+        except Exception as fallback_error:
+            return f"Error searching docs (MCP and fallback both failed): MCP error: {str(e)}, Fallback error: {str(fallback_error)}"
 
 
 @tool
@@ -144,9 +268,21 @@ def get_langfuse_docs_page(pathOrUrl: str) -> str:
         pathOrUrl: The docs path (e.g., "/docs/get-started") or full URL.
     """
     try:
-        return _call_mcp_tool("getLangfuseDocsPage", {"pathOrUrl": pathOrUrl})
+        result = _call_mcp_tool("getLangfuseDocsPage", {"pathOrUrl": pathOrUrl})
+        # Check if result indicates an error
+        if result.startswith("MCP Error:"):
+            raise Exception(result)
+        return result
     except Exception as e:
-        return f"Error fetching page: {str(e)}"
+        # Fallback: fetch the page directly
+        _track_mcp_error(
+            "getLangfuseDocsPage", str(e), {"pathOrUrl": pathOrUrl, "fallback": True}
+        )
+        try:
+            content = _fetch_docs_page_directly(pathOrUrl)
+            return f"[Fallback: Direct docs fetch]\n\n{content}"
+        except Exception as fallback_error:
+            return f"Error fetching page (MCP and fallback both failed): MCP error: {str(e)}, Fallback error: {str(fallback_error)}"
 
 
 @tool
@@ -157,9 +293,19 @@ def get_langfuse_overview() -> str:
     Call this at the start to discover available documentation.
     """
     try:
-        return _call_mcp_tool("getLangfuseOverview", {})
+        result = _call_mcp_tool("getLangfuseOverview", {})
+        # Check if result indicates an error
+        if result.startswith("MCP Error:"):
+            raise Exception(result)
+        return result
     except Exception as e:
-        return f"Error fetching overview: {str(e)}"
+        # Fallback: fetch llms.txt directly
+        _track_mcp_error("getLangfuseOverview", str(e), {"fallback": True})
+        try:
+            content = _fetch_llms_txt_directly()
+            return f"[Fallback: Direct docs fetch]\n\n{content}"
+        except Exception as fallback_error:
+            return f"Error fetching overview (MCP and fallback both failed): MCP error: {str(e)}, Fallback error: {str(fallback_error)}"
 
 
 class LangfuseDocsAgent(BaseAgent):

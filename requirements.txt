@@ -8,3 +8,4 @@ httpx
 chromadb
 langchain-chroma
 langfuse
+markdownify
